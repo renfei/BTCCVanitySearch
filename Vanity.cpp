@@ -233,23 +233,23 @@ VanitySearch::VanitySearch(Secp256K1 *secp, vector<std::string> &inputPrefixes,s
   } else {
 
     // Wild card search
-    switch (inputPrefixes[0].data()[0]) {
+    {
+      const CoinParams &cp = secp->coinParams;
+      string lcfirst = inputPrefixes[0].substr(0, cp.bech32Hrp.length() + 2);
+      std::transform(lcfirst.begin(), lcfirst.end(), lcfirst.begin(), ::tolower);
+      string bech32start = cp.bech32Hrp + "1q";
 
-    case '1':
-      searchType = P2PKH;
-      break;
-    case '3':
-      searchType = P2SH;
-      break;
-    case 'b':
-    case 'B':
-      searchType = BECH32;
-      break;
-
-    default:
-      printf("Invalid start character 1,3 or b, expected");
-      exit(1);
-
+      if (lcfirst == bech32start) {
+        searchType = BECH32;
+      } else if (inputPrefixes[0].data()[0] == cp.p2pkhPrefix) {
+        searchType = P2PKH;
+      } else if (inputPrefixes[0].data()[0] == cp.p2shPrefix) {
+        searchType = P2SH;
+      } else {
+        printf("Invalid start character for %s (expected '%c', '%c' or '%s1q')\n",
+               cp.name.c_str(), cp.p2pkhPrefix, cp.p2shPrefix, cp.bech32Hrp.c_str());
+        exit(1);
+      }
     }
 
     string searchInfo = string(searchModes[searchMode]) + (startPubKeySpecified ? ", with public key" : "");
@@ -349,24 +349,34 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
 
   int aType = -1;
 
+  {
+    const CoinParams &cp = secp->coinParams;
+    string bech32start = cp.bech32Hrp + "1q"; // 如 "bc1q" 或 "cc1q"
+    size_t bslen = bech32start.length();
 
-  switch (prefix.data()[0]) {
-  case '1':
-    aType = P2PKH;
-    break;
-  case '3':
-    aType = P2SH;
-    break;
-  case 'b':
-  case 'B':
-    std::transform(prefix.begin(), prefix.end(), prefix.begin(), ::tolower);
-    if(strncmp(prefix.c_str(), "bc1q", 4) == 0)
-      aType = BECH32;
-    break;
+    // 先尝试 BECH32（大小写不敏感匹配 HRP+"1q"）
+    if (prefix.length() >= bslen) {
+      string lcpfx = prefix.substr(0, bslen);
+      std::transform(lcpfx.begin(), lcpfx.end(), lcpfx.begin(), ::tolower);
+      if (lcpfx == bech32start) {
+        std::transform(prefix.begin(), prefix.end(), prefix.begin(), ::tolower);
+        aType = BECH32;
+      }
+    }
+
+    if (aType == -1) {
+      if (prefix.data()[0] == cp.p2pkhPrefix) {
+        aType = P2PKH;
+      } else if (prefix.data()[0] == cp.p2shPrefix) {
+        aType = P2SH;
+      }
+    }
   }
 
-  if (aType==-1) {
-    printf("Ignoring prefix \"%s\" (must start with 1 or 3 or bc1q)\n", prefix.c_str());
+  if (aType == -1) {
+    const CoinParams &cp = secp->coinParams;
+    printf("Ignoring prefix \"%s\" (must start with '%c', '%c' or \"%s1q\" for %s)\n",
+           prefix.c_str(), cp.p2pkhPrefix, cp.p2shPrefix, cp.bech32Hrp.c_str(), cp.name.c_str());
     return false;
   }
 
@@ -379,10 +389,13 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
   if (aType == BECH32) {
 
     // BECH32
+    const CoinParams &cp = secp->coinParams;
     uint8_t witprog[40];
     size_t witprog_len;
     int witver;
-    const char* hrp = "bc";
+    const char* hrp = cp.bech32Hrp.c_str();
+    // bech32 前缀长度：HRP + "1q"（如 "bc1q" 或 "cc1q"）
+    size_t bech32PfxLen = cp.bech32Hrp.length() + 2;
 
     int ret = segwit_addr_decode(&witver, witprog, &witprog_len, hrp, prefix.c_str());
 
@@ -401,8 +414,8 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
 
     }
 
-    if (prefix.length() < 5) {
-      printf("Ignoring prefix \"%s\" (too short, length<5 )\n", prefix.c_str());
+    if (prefix.length() < bech32PfxLen + 1) {
+      printf("Ignoring prefix \"%s\" (too short)\n", prefix.c_str());
       return false;
     }
 
@@ -414,14 +427,14 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
     uint8_t data[64];
     memset(data,0,64);
     size_t data_length;
-    if(!bech32_decode_nocheck(data,&data_length,prefix.c_str()+4)) {
+    if(!bech32_decode_nocheck(data,&data_length,prefix.c_str()+bech32PfxLen)) {
       printf("Ignoring prefix \"%s\" (Only \"023456789acdefghjklmnpqrstuvwxyz\" allowed)\n", prefix.c_str());
       return false;
     }
 
     // Difficulty
     it->sPrefix = *(prefix_t *)data;
-    it->difficulty = pow(2, 5*(prefix.length()-4));
+    it->difficulty = pow(2, 5*(prefix.length()-bech32PfxLen));
     it->isFull = false;
     it->lPrefix = 0;
     it->prefix = (char *)prefix.c_str();
@@ -489,9 +502,10 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
     }
 
     if (searchType == P2SH) {
-      if (result.data()[0] != 5) {
+      if (result.data()[0] != secp->coinParams.scriptAddress) {
         if(caseSensitive)
-          printf("Ignoring prefix \"%s\" (Unreachable, 31h1 to 3R2c only)\n", prefix.c_str());
+          printf("Ignoring prefix \"%s\" (Unreachable P2SH prefix for %s)\n",
+                 prefix.c_str(), secp->coinParams.name.c_str());
         return false;
       }
     }

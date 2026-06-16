@@ -37,7 +37,7 @@ void printUsage() {
   printf("             [-gpuId gpuId1[,gpuId2,...]] [-g g1x,g1y,[,g2x,g2y,...]]\n");
   printf("             [-o outputfile] [-m maxFound] [-ps seed] [-s seed] [-t nbThread]\n");
   printf("             [-nosse] [-r rekey] [-check] [-kp] [-sp startPubKey]\n");
-  printf("             [-rp privkey partialkeyfile] [prefix]\n\n");
+  printf("             [-coin BTC|BTCC] [-rp privkey partialkeyfile] [prefix]\n\n");
   printf(" prefix: prefix to search (Can contains wildcard '?' or '*')\n");
   printf(" -v: Print version\n");
   printf(" -u: Search uncompressed addresses\n");
@@ -62,6 +62,12 @@ void printUsage() {
   printf(" -rp privkey partialkeyfile: Reconstruct final private key(s) from partial key(s) info.\n");
   printf(" -sp startPubKey: Start the search with a pubKey (for private key splitting)\n");
   printf(" -r rekey: Rekey interval in MegaKey, default is disabled\n");
+  printf(" -coin BTC|BTCC: Select coin network (default: BTC)\n");
+  printf("   BTC:  PUBKEY_ADDRESS=0, SCRIPT_ADDRESS=5, SECRET_KEY=128, Bech32 HRP=\"bc\"\n");
+  printf("   BTCC: PUBKEY_ADDRESS=28, SCRIPT_ADDRESS=40, SECRET_KEY=188, Bech32 HRP=\"cc\"\n");
+  printf(" Examples (BTCC):\n");
+  printf("   ./VanitySearch -coin BTCC cc1ren\n");
+  printf("   ./VanitySearch -coin BTCC Cren\n");
   exit(0);
 
 }
@@ -262,6 +268,8 @@ void reconstructAdd(Secp256K1 *secp, string fileName, string outputFile, string 
   vector<string> lines;
   parseFile(fileName,lines);
 
+  const CoinParams &cp = secp->coinParams;
+
   for (int i = 0; i < (int)lines.size(); i+=2) {
 
     string addr;
@@ -271,17 +279,20 @@ void reconstructAdd(Secp256K1 *secp, string fileName, string outputFile, string 
 
       addr = lines[i].substr(12);
 
-      switch (addr.data()[0]) {
-      case '1':
-        addrType = P2PKH; break;
-      case '3':
-        addrType = P2SH; break;
-      case 'b':
-      case 'B':
-        addrType = BECH32; break;
-      default:
+      // 根据当前币种的参数判断地址类型
+      string bech32start = cp.bech32Hrp + "1";
+      string lcaddr = addr.substr(0, bech32start.length());
+      std::transform(lcaddr.begin(), lcaddr.end(), lcaddr.begin(), ::tolower);
+
+      if (lcaddr == bech32start) {
+        addrType = BECH32;
+      } else if (addr.data()[0] == cp.p2pkhPrefix) {
+        addrType = P2PKH;
+      } else if (addr.data()[0] == cp.p2shPrefix) {
+        addrType = P2SH;
+      } else {
         printf("Invalid partialkey info file at line %d\n", i);
-        printf("%s Address format not supported\n", addr.c_str());
+        printf("%s Address format not supported for %s\n", addr.c_str(), cp.name.c_str());
         continue;
       }
 
@@ -381,6 +392,26 @@ int main(int argc, char* argv[]) {
     exit(-1);
   }
 
+  // 预定义币种参数（在参数解析前声明，供预扫描和主循环共用）
+  // P2PKH 首字符由版本字节数学推导：BTC 0x00→'1', BTCC 0x1C→'C'
+  // P2SH 首字符：BTC 0x05→'3', BTCC 0x28→'H'
+  CoinParams coinBTC_pre  = {"BTC",  0x00, 0x05, 0x80, "bc", '1', '3'};
+  CoinParams coinBTCC_pre = {"BTCC", 0x1C, 0x28, 0xBC, "cc", 'C', 'H'};
+
+  // 预扫描 -coin 参数，以便在 -ca/-cp/-kp 等即时退出命令之前生效
+  for (int i = 1; i < argc - 1; i++) {
+    if (strcmp(argv[i], "-coin") == 0) {
+      string coinArg = string(argv[i + 1]);
+      std::transform(coinArg.begin(), coinArg.end(), coinArg.begin(), ::toupper);
+      if (coinArg == "BTC") {
+        secp->SetCoinParams(coinBTC_pre);
+      } else if (coinArg == "BTCC") {
+        secp->SetCoinParams(coinBTCC_pre);
+      }
+      break;
+    }
+  }
+
   int a = 1;
   bool gpuEnable = false;
   bool stop = false;
@@ -401,9 +432,32 @@ int main(int argc, char* argv[]) {
   bool caseSensitive = true;
   bool paranoiacSeed = false;
 
+  // 使用预扫描阶段定义的币种参数（coinBTC_pre / coinBTCC_pre）
+  CoinParams &coinBTC  = coinBTC_pre;
+  CoinParams &coinBTCC = coinBTCC_pre;
+  CoinParams selectedCoin = coinBTC;
+
   while (a < argc) {
 
-    if (strcmp(argv[a], "-gpu")==0) {
+    if (strcmp(argv[a], "-coin")==0) {
+      a++;
+      if (a >= argc) {
+        printf("Error: -coin requires an argument (BTC or BTCC)\n");
+        exit(-1);
+      }
+      // 大小写不敏感比较
+      string coinArg = string(argv[a]);
+      std::transform(coinArg.begin(), coinArg.end(), coinArg.begin(), ::toupper);
+      if (coinArg == "BTC") {
+        selectedCoin = coinBTC;
+      } else if (coinArg == "BTCC") {
+        selectedCoin = coinBTCC;
+      } else {
+        printf("Error: Unknown coin \"%s\", supported: BTC, BTCC\n", argv[a]);
+        exit(-1);
+      }
+      a++;
+    } else if (strcmp(argv[a], "-gpu")==0) {
       gpuEnable = true;
       a++;
     } else if (strcmp(argv[a], "-gpuId")==0) {
@@ -542,7 +596,10 @@ int main(int argc, char* argv[]) {
 
   }
 
-  printf("VanitySearch v" RELEASE "\n");
+  // 应用选择的币种参数
+  secp->SetCoinParams(selectedCoin);
+
+  printf("VanitySearch v" RELEASE " [%s]\n", selectedCoin.name.c_str());
 
   if(gridSize.size()==0) {
     for (int i = 0; i < gpuId.size(); i++) {

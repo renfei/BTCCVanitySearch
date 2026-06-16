@@ -27,6 +27,17 @@
 #define P2SH   1
 #define BECH32 2
 
+// 网络参数结构体，支持多币种
+struct CoinParams {
+  std::string name;
+  uint8_t pubkeyAddress;  // P2PKH 版本字节
+  uint8_t scriptAddress;  // P2SH 版本字节
+  uint8_t secretKey;      // WIF 版本字节
+  std::string bech32Hrp;  // Bech32 HRP（如 "bc" 或 "cc"）
+  char p2pkhPrefix;       // P2PKH 地址首字符（BTC='1', BTCC='C'）
+  char p2shPrefix;        // P2SH 地址首字符（BTC='3', BTCC='H'）
+};
+
 class Secp256K1 {
 
 public:
@@ -34,6 +45,7 @@ public:
   Secp256K1();
   ~Secp256K1();
   void Init();
+  void SetCoinParams(const CoinParams &params);
   Point ComputePublicKey(Int *privKey);
   Point NextKey(Point &key);
   void Check();
@@ -54,7 +66,7 @@ public:
 
   bool CheckPudAddress(std::string address);
 
-  static Int DecodePrivateKey(char *key,bool *compressed);
+  Int DecodePrivateKey(char *key,bool *compressed);
 
   Point Add(Point &p1, Point &p2);
   Point Add2(Point &p1, Point &p2);
@@ -64,6 +76,7 @@ public:
 
   Point G;                 // Generator
   Int   order;             // Curve order
+  CoinParams coinParams;   // 当前选择的网络参数
 
 private:
 

@@ -23,6 +23,12 @@
 #include <string.h>
 
 Secp256K1::Secp256K1() {
+  // 默认使用 BTC 主网参数
+  coinParams = {"BTC", 0x00, 0x05, 0x80, "bc", '1', '3'};
+}
+
+void Secp256K1::SetCoinParams(const CoinParams &params) {
+  coinParams = params;
 }
 
 void Secp256K1::Init() {
@@ -208,57 +214,48 @@ Int Secp256K1::DecodePrivateKey(char *key,bool *compressed) {
   ret.SetInt32(0);
   std::vector<unsigned char> privKey;
 
-  if(key[0] == '5') {
+  DecodeBase58(key, privKey);
 
-    // Not compressed
-    DecodeBase58(key,privKey);
-    if(privKey.size() != 37) {
-      printf("Invalid private key, size != 37 (size=%d)!\n",(int)privKey.size());
-      ret.SetInt32(-1);
-      return ret;
-    }
+  if (privKey.size() == 37) {
 
-    if(privKey[0] != 0x80) {
-      printf("Invalid private key, wrong prefix !\n");
-      return ret;
+    // 非压缩 WIF：版本字节(1) + 私钥(32) + 校验和(4)
+    if (privKey[0] != coinParams.secretKey) {
+      printf("Warning, unexpected WIF version byte 0x%02X (expected 0x%02X for %s)\n",
+             privKey[0], coinParams.secretKey, coinParams.name.c_str());
     }
 
     int count = 31;
-    for(int i = 1; i < 33; i++)
-      ret.SetByte(count--,privKey[i]);
+    for (int i = 1; i < 33; i++)
+      ret.SetByte(count--, privKey[i]);
 
-    // Compute checksum
     unsigned char c[4];
     sha256_checksum(privKey.data(), 33, c);
 
-    if( c[0]!=privKey[33] || c[1]!=privKey[34] ||
-        c[2]!=privKey[35] || c[3]!=privKey[36] ) {
+    if (c[0]!=privKey[33] || c[1]!=privKey[34] ||
+        c[2]!=privKey[35] || c[3]!=privKey[36]) {
       printf("Warning, Invalid private key checksum !\n");
     }
 
     *compressed = false;
     return ret;
 
-  } else if(key[0] == 'K' || key[0] == 'L') {
+  } else if (privKey.size() == 38) {
 
-    // Compressed
-    DecodeBase58(key,privKey);
-    if(privKey.size() != 38) {
-      printf("Invalid private key, size != 38 (size=%d)!\n",(int)privKey.size());
-      ret.SetInt32(-1);
-      return ret;
+    // 压缩 WIF：版本字节(1) + 私钥(32) + 压缩标志0x01(1) + 校验和(4)
+    if (privKey[0] != coinParams.secretKey) {
+      printf("Warning, unexpected WIF version byte 0x%02X (expected 0x%02X for %s)\n",
+             privKey[0], coinParams.secretKey, coinParams.name.c_str());
     }
 
     int count = 31;
-    for(int i = 1; i < 33; i++)
-      ret.SetByte(count--,privKey[i]);
+    for (int i = 1; i < 33; i++)
+      ret.SetByte(count--, privKey[i]);
 
-    // Compute checksum
     unsigned char c[4];
     sha256_checksum(privKey.data(), 34, c);
 
-    if( c[0]!=privKey[34] || c[1]!=privKey[35] ||
-        c[2]!=privKey[36] || c[3]!=privKey[37] ) {
+    if (c[0]!=privKey[34] || c[1]!=privKey[35] ||
+        c[2]!=privKey[36] || c[3]!=privKey[37]) {
       printf("Warning, Invalid private key checksum !\n");
     }
 
@@ -267,7 +264,8 @@ Int Secp256K1::DecodePrivateKey(char *key,bool *compressed) {
 
   }
 
-  printf("Invalid private key, not starting with 5,K or L !\n");
+  printf("Invalid private key, unexpected length %d (expected 37 or 38 after Base58 decode)\n",
+         (int)privKey.size());
   ret.SetInt32(-1);
   return ret;
 
@@ -604,7 +602,7 @@ std::string Secp256K1::GetPrivAddress(bool compressed,Int &privKey) {
 
   unsigned char address[38];
 
-  address[0] = 0x80; // Mainnet
+  address[0] = coinParams.secretKey; // WIF 版本字节
   privKey.Get32Bytes(address + 1);
 
   if( compressed ) {
@@ -658,29 +656,30 @@ std::vector<std::string> Secp256K1::GetAddress(int type, bool compressed, unsign
   switch (type) {
 
   case P2PKH:
-    add1[0] = 0x00;
-    add2[0] = 0x00;
-    add3[0] = 0x00;
-    add4[0] = 0x00;
+    add1[0] = coinParams.pubkeyAddress;
+    add2[0] = coinParams.pubkeyAddress;
+    add3[0] = coinParams.pubkeyAddress;
+    add4[0] = coinParams.pubkeyAddress;
     break;
 
   case P2SH:
-    add1[0] = 0x05;
-    add2[0] = 0x05;
-    add3[0] = 0x05;
-    add4[0] = 0x05;
+    add1[0] = coinParams.scriptAddress;
+    add2[0] = coinParams.scriptAddress;
+    add3[0] = coinParams.scriptAddress;
+    add4[0] = coinParams.scriptAddress;
     break;
 
   case BECH32:
   {
     char output[128];
-    segwit_addr_encode(output, "bc", 0, h1, 20);
+    const char *hrp = coinParams.bech32Hrp.c_str();
+    segwit_addr_encode(output, hrp, 0, h1, 20);
     ret.push_back(std::string(output));
-    segwit_addr_encode(output, "bc", 0, h2, 20);
+    segwit_addr_encode(output, hrp, 0, h2, 20);
     ret.push_back(std::string(output));
-    segwit_addr_encode(output, "bc", 0, h3, 20);
+    segwit_addr_encode(output, hrp, 0, h3, 20);
     ret.push_back(std::string(output));
-    segwit_addr_encode(output, "bc", 0, h4, 20);
+    segwit_addr_encode(output, hrp, 0, h4, 20);
     ret.push_back(std::string(output));
     return ret;
   }
@@ -713,17 +712,17 @@ std::string Secp256K1::GetAddress(int type, bool compressed,unsigned char *hash1
   switch(type) {
 
     case P2PKH:
-      address[0] = 0x00;
+      address[0] = coinParams.pubkeyAddress;
       break;
 
     case P2SH:
-      address[0] = 0x05;
+      address[0] = coinParams.scriptAddress;
       break;
 
     case BECH32:
     {
       char output[128];
-      segwit_addr_encode(output, "bc", 0, hash160, 20);
+      segwit_addr_encode(output, coinParams.bech32Hrp.c_str(), 0, hash160, 20);
       return std::string(output);
     }
     break;
@@ -743,7 +742,7 @@ std::string Secp256K1::GetAddress(int type, bool compressed, Point &pubKey) {
   switch (type) {
 
   case P2PKH:
-    address[0] = 0x00;
+    address[0] = coinParams.pubkeyAddress;
     break;
 
   case BECH32:
@@ -754,7 +753,7 @@ std::string Secp256K1::GetAddress(int type, bool compressed, Point &pubKey) {
     char output[128];
     uint8_t h160[20];
     GetHash160(type, compressed, pubKey, h160);
-    segwit_addr_encode(output,"bc",0,h160,20);
+    segwit_addr_encode(output, coinParams.bech32Hrp.c_str(), 0, h160, 20);
     return std::string(output);
   }
   break;
@@ -763,7 +762,7 @@ std::string Secp256K1::GetAddress(int type, bool compressed, Point &pubKey) {
     if (!compressed) {
       return " P2SH: Only compressed key ";
     }
-    address[0] = 0x05;
+    address[0] = coinParams.scriptAddress;
     break;
   }
 
